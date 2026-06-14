@@ -1,5 +1,4 @@
 import { randomBytes } from 'node:crypto'
-import { getTokenMetadata } from '@cashu/cashu-ts'
 import { Hono } from 'hono'
 import { cors } from 'hono/cors'
 import {
@@ -19,7 +18,6 @@ import {
   updatePageDetails,
   type GiftPageRow,
 } from './db.js'
-import { syncTokenWithMint } from './claim-check.js'
 import { fetchLightningAddressInvoice } from './lnurl-pay.js'
 import {
   CLAIMED_PAGE_TTL_MS,
@@ -107,6 +105,8 @@ function rowToPublicPage(row: NonNullable<ReturnType<typeof getPage>>): GiftPage
 async function refreshTokenFromMint(row: GiftPageRow): Promise<void> {
   if (row.claimed_at !== null) return
 
+  const { syncTokenWithMint } = await import('./claim-check.js')
+
   normalizeToSingleToken(row.id)
   const refreshed = getPage(row.id)
   if (!refreshed) return
@@ -140,7 +140,8 @@ async function refreshTokenFromMint(row: GiftPageRow): Promise<void> {
   }
 }
 
-function parseTokenInput(raw: string) {
+async function parseTokenInput(raw: string) {
+  const { getTokenMetadata } = await import('@cashu/cashu-ts')
   const token = resolveTokenFromInput(raw)
   if (!token) {
     throw new Error(`Invalid Cashu token (paste cashuB… or ${CASHU_EMOJI_CARRIER} emoji token)`)
@@ -272,7 +273,7 @@ export function createApp() {
         })
       }
 
-      const parsed = parseTokenInput(rawToken)
+      const parsed = await parseTokenInput(rawToken)
       const result = addTokenToPage(id, parsed)
 
       if (!result.ok) {
@@ -325,7 +326,7 @@ export function createApp() {
     }
 
     try {
-      const remaining = rawRemaining ? parseTokenInput(rawRemaining) : null
+      const remaining = rawRemaining ? await parseTokenInput(rawRemaining) : null
       const result = syncPrimaryTokenAfterRedeem(id, remaining)
 
       if (!result.ok) {
