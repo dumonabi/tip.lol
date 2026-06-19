@@ -56,6 +56,15 @@ ensureColumn('recipient_whatsapp', 'recipient_whatsapp TEXT')
 ensureColumn('notify_via_whatsapp', 'notify_via_whatsapp INTEGER DEFAULT 0')
 ensureColumn('claimed_at', 'claimed_at INTEGER')
 ensureColumn('claim_check_at', 'claim_check_at INTEGER')
+ensureColumn('initial_amount_sats', 'initial_amount_sats INTEGER')
+
+db.exec(
+  `UPDATE gift_pages
+   SET initial_amount_sats = amount_sats
+   WHERE initial_amount_sats IS NULL
+     AND amount_sats IS NOT NULL
+     AND amount_sats > 0`,
+)
 
 export type GiftPageRow = {
   id: string
@@ -73,6 +82,7 @@ export type GiftPageRow = {
   notify_via_whatsapp: number | null
   claimed_at: number | null
   claim_check_at: number | null
+  initial_amount_sats: number | null
 }
 
 function parseTokens(row: GiftPageRow): StoredToken[] {
@@ -319,9 +329,11 @@ export function addTokenToPage(
   const expiresAt = computeExpiresAt(now)
   db.prepare(
     `UPDATE gift_pages
-     SET funded_at = COALESCE(funded_at, ?), expires_at = ?
+     SET funded_at = COALESCE(funded_at, ?),
+         expires_at = ?,
+         initial_amount_sats = COALESCE(initial_amount_sats, ?)
      WHERE id = ?`,
-  ).run(now, expiresAt, id)
+  ).run(now, expiresAt, entry.amountSats, id)
 
   return { ok: true }
 }

@@ -13,6 +13,8 @@ import {
   tryEncodeEmojiToken,
 } from '../../shared/emoji-token'
 import type { UrScanProgress } from '../lib/ur-token-decode'
+import { releaseQrScanner } from '../lib/qr-scanner-release'
+import { scrollSectionToTop } from '../lib/scroll-section'
 
 type Props = {
   value: string
@@ -43,6 +45,8 @@ export const CashuTokenInput = forwardRef<CashuTokenInputHandle, Props>(
       Awaited<ReturnType<typeof loadUrDecoder>> | null
     >(null)
     const urActiveRef = useRef(false)
+    const cameraRef = useRef<HTMLDivElement>(null)
+    const pasteInputRef = useRef<HTMLTextAreaElement>(null)
     const [showScanner, setShowScanner] = useState(false)
     const [scanError, setScanError] = useState<string | null>(null)
     const [pasteError, setPasteError] = useState<string | null>(null)
@@ -51,11 +55,6 @@ export const CashuTokenInput = forwardRef<CashuTokenInputHandle, Props>(
 
     const emojiPreview = value ? tryEncodeEmojiToken(value) : null
 
-    const clearReaderElement = useCallback(() => {
-      const el = document.getElementById(readerId)
-      if (el) el.innerHTML = ''
-    }, [readerId])
-
     const stopScanner = useCallback(async () => {
       const scanner = scannerRef.current
       scannerRef.current = null
@@ -63,27 +62,20 @@ export const CashuTokenInput = forwardRef<CashuTokenInputHandle, Props>(
       setUrProgress(idleUrProgress)
       urActiveRef.current = false
       urDecoderRef.current?.reset()
-
-      if (scanner) {
-        try {
-          if (scanner.isScanning) await scanner.stop()
-        } catch {
-          // ignore
-        }
-        try {
-          scanner.clear()
-        } catch {
-          // ignore
-        }
-      }
-
-      clearReaderElement()
-      document.getElementById('qr-shaded-region')?.remove()
-    }, [clearReaderElement])
+      await releaseQrScanner(scanner, readerId)
+    }, [readerId])
 
     useImperativeHandle(ref, () => ({ stopScanning: stopScanner }), [
       stopScanner,
     ])
+
+    useEffect(() => {
+      return () => {
+        const scanner = scannerRef.current
+        scannerRef.current = null
+        void releaseQrScanner(scanner, readerId)
+      }
+    }, [readerId])
 
     useEffect(() => {
       setCanScan(
@@ -127,64 +119,120 @@ export const CashuTokenInput = forwardRef<CashuTokenInputHandle, Props>(
       if (!showScanner) return
 
       let cancelled = false
+      let activeScanner: Html5Qrcode | null = null
+
       urActiveRef.current = false
       setUrProgress(idleUrProgress)
+      scrollSectionToTop(cameraRef.current)
 
-      void loadUrDecoder().then((decoder) => {
+      void (async () => {
+        urDecoderRef.current = await loadUrDecoder()
         if (cancelled) return
-        urDecoderRef.current = decoder
-      })
 
-      const scanner = new Html5Qrcode(readerId)
-      scannerRef.current = scanner
+        const scanner = new Html5Qrcode(readerId)
+        activeScanner = scanner
+        scannerRef.current = scanner
 
-      void scanner
-        .start(
-          { facingMode: 'environment' },
-          {
-            fps: 20,
-            qrbox: (width, height) => {
-              const edge = Math.min(width, height)
-              const size = Math.floor(edge * 0.88)
-              return { width: size, height: size }
+        try {
+          await scanner.start(
+            { facingMode: 'environment' },
+            {
+              fps: 20,
+              qrbox: (width, height) => {
+                const edge = Math.min(width, height)
+                const size = Math.floor(edge * 0.88)
+                return { width: size, height: size }
+              },
+              aspectRatio: 1,
             },
-            aspectRatio: 1,
-          },
-          (decoded) => {
-            if (cancelled) return
-            handleScanPayload(decoded)
-          },
-          () => {},
-        )
-        .catch((err: unknown) => {
-          if (cancelled) return
-          setScanError(
-            err instanceof Error ? err.message : 'Could not access camera',
+            (decoded) => {
+              if (cancelled) return
+              handleScanPayload(decoded)
+            },
+            () => {},
           )
-          void stopScanner()
-        })
+
+          if (cancelled) {
+            await releaseQrScanner(scanner, readerId)
+            return
+          }
+
+          scrollSectionToTop(cameraRef.current)
+        } catch (err: unknown) {
+          if (!cancelled) {
+            setScanError(
+              err instanceof Error ? err.message : 'Could not access camera',
+            )
+            setShowScanner(false)
+          }
+          await releaseQrScanner(scanner, readerId)
+          if (!cancelled) scannerRef.current = null
+        }
+      })()
 
       return () => {
         cancelled = true
-        void stopScanner()
+        scannerRef.current = null
+        urActiveRef.current = false
+        urDecoderRef.current?.reset()
+        void releaseQrScanner(activeScanner, readerId)
       }
-    }, [showScanner, readerId, handleScanPayload, stopScanner])
+    }, [showScanner, readerId, handleScanPayload])
+
+    useEffect(() => {
+      if (!showScanner) return
+
+      function handleVisibilityChange() {
+        if (document.visibilityState === 'hidden') {
+          void stopScanner()
+        }
+      }
+
+      document.addEventListener('visibilitychange', handleVisibilityChange)
+      return () => {
+        document.removeEventListener('visibilitychange', handleVisibilityChange)
+      }
+    }, [showScanner, stopScanner])
+
+    async function applyPastedText(text: string) {
+      const token = resolveTokenFromInput(text)
+      if (!token) {
+        setPasteError('No Cashu token in clipboard')
+        return
+      }
+      onChange(token)
+    }
 
     async function handlePaste() {
-      await stopScanner()
       setPasteError(null)
       setScanError(null)
+
+      // Read clipboard in the same tap — any await before this breaks mobile Safari.
+      const clipboardRead = navigator.clipboard.readText()
+
       try {
-        const text = await navigator.clipboard.readText()
-        const token = resolveTokenFromInput(text)
-        if (!token) {
-          setPasteError('No Cashu token in clipboard')
+        const text = await clipboardRead
+        if (showScanner) await stopScanner()
+        await applyPastedText(text)
+      } catch {
+        const pasteInput = pasteInputRef.current
+        if (!pasteInput) {
+          setPasteError('Could not read clipboard')
           return
         }
-        onChange(token)
-      } catch {
-        setPasteError('Could not read clipboard')
+        pasteInput.value = ''
+        pasteInput.focus({ preventScroll: true })
       }
+    }
+
+    async function handlePasteInput(event: React.ClipboardEvent<HTMLTextAreaElement>) {
+      event.preventDefault()
+      setPasteError(null)
+      setScanError(null)
+      const text = event.clipboardData.getData('text/plain')
+      event.currentTarget.blur()
+      if (showScanner) await stopScanner()
+      await applyPastedText(text)
     }
 
     async function startScanner() {
@@ -192,21 +240,30 @@ export const CashuTokenInput = forwardRef<CashuTokenInputHandle, Props>(
       setPasteError(null)
       setUrProgress(idleUrProgress)
       urActiveRef.current = false
-      clearReaderElement()
+      await releaseQrScanner(scannerRef.current, readerId)
+      scannerRef.current = null
       urDecoderRef.current = await loadUrDecoder()
       setShowScanner(true)
     }
 
     return (
       <div className="token-input">
+        <textarea
+          ref={pasteInputRef}
+          className="token-paste-input"
+          aria-hidden
+          tabIndex={-1}
+          onPaste={(event) => void handlePasteInput(event)}
+        />
+
         <div className="token-actions">
-          <button type="button" className="secondary" onClick={handlePaste}>
+          <button type="button" className="secondary" onClick={() => void handlePaste()}>
             Paste
           </button>
           <button
             type="button"
             className="secondary"
-            onClick={startScanner}
+            onClick={() => void startScanner()}
             disabled={!canScan || showScanner}
           >
             Scan Cashu QR
@@ -252,7 +309,7 @@ export const CashuTokenInput = forwardRef<CashuTokenInputHandle, Props>(
                 />
               </div>
             )}
-            <div id={readerId} className="qr-reader" />
+            <div id={readerId} ref={cameraRef} className="qr-reader" />
             <button
               type="button"
               className="ghost small"

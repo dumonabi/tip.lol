@@ -24,8 +24,16 @@ import {
   computeDaysRemaining,
   type CreatePageResponse,
   type GiftPage,
+  type TokenOptimizeResult,
 } from '../shared/types.js'
 import { CASHU_EMOJI_CARRIER, resolveTokenFromInput } from '../shared/emoji-token.js'
+import {
+  OptimizeError,
+  executeTokenOptimize,
+  previewTokenOptimize,
+} from './token-optimize.js'
+import { listTokenProofSats } from './claim-check.js'
+import { getBtcUsdPrice } from './btc-price.js'
 
 const SLUG_BYTES = 32
 const CLAIM_CHECK_INTERVAL_MS = 5 * 60 * 1000
@@ -79,6 +87,14 @@ function rowToPublicPage(row: NonNullable<ReturnType<typeof getPage>>): GiftPage
     claimed && row.claimed_at !== null
       ? computeDaysRemaining(row.claimed_at + CLAIMED_PAGE_TTL_MS)
       : null
+  const amountSats = row.amount_sats
+  const initialAmountSats = row.initial_amount_sats
+  const partiallySpent =
+    !claimed &&
+    tokens.length > 0 &&
+    initialAmountSats != null &&
+    amountSats != null &&
+    amountSats < initialAmountSats
 
   return {
     id: row.id,
@@ -86,7 +102,9 @@ function rowToPublicPage(row: NonNullable<ReturnType<typeof getPage>>): GiftPage
     funded: !claimed && tokens.length > 0,
     expired,
     claimed,
-    amountSats: row.amount_sats,
+    amountSats,
+    initialAmountSats,
+    partiallySpent,
     unit: row.unit,
     mint: row.mint,
     tokens: claimed || expired ? [] : tokens,
@@ -165,6 +183,23 @@ async function parseTokenInput(raw: string) {
     unit: meta.unit,
     mint: meta.mint,
   }
+}
+
+function getFundedPageToken(id: string) {
+  const row = getPageIfActive(id)
+  if (!row) return { error: 'Page not found' as const, status: 404 as const }
+  if (isClaimed(row)) {
+    return { error: 'This gift was already claimed' as const, status: 410 as const }
+  }
+  if (isExpired(row)) {
+    return { error: 'This page has expired' as const, status: 410 as const }
+  }
+  const tokens = getStoredTokens(row)
+  const primary = tokens[0]
+  if (!primary) {
+    return { error: 'This page has no token yet' as const, status: 409 as const }
+  }
+  return { row, primary }
 }
 
 export function createApp() {
@@ -357,6 +392,101 @@ export function createApp() {
     }
   })
 
+  app.get('/api/pages/:id/token-proofs', async (c) => {
+    const id = c.req.param('id')
+    if (!isValidSlug(id)) {
+      return c.json({ error: 'Invalid page id' }, 400)
+    }
+
+    const funded = getFundedPageToken(id)
+    if ('error' in funded) {
+      return c.json({ error: funded.error }, funded.status)
+    }
+
+    try {
+      const proofSats = await listTokenProofSats(funded.primary.token)
+      return c.json({ proofSats })
+    } catch (err) {
+      const message =
+        err instanceof Error ? err.message : 'Could not read token proofs'
+      return c.json({ error: message }, 400)
+    }
+  })
+
+  app.post('/api/pages/:id/optimize-token/preview', async (c) => {
+    const id = c.req.param('id')
+    if (!isValidSlug(id)) {
+      return c.json({ error: 'Invalid page id' }, 400)
+    }
+
+    const funded = getFundedPageToken(id)
+    if ('error' in funded) {
+      return c.json({ error: funded.error }, funded.status)
+    }
+
+    try {
+      const preview = await previewTokenOptimize(funded.primary.token)
+      return c.json(preview)
+    } catch (err) {
+      const message =
+        err instanceof OptimizeError
+          ? err.message
+          : err instanceof Error
+            ? err.message
+            : 'Could not preview optimization'
+      return c.json({ error: message }, 400)
+    }
+  })
+
+  app.post('/api/pages/:id/optimize-token', async (c) => {
+    const id = c.req.param('id')
+    if (!isValidSlug(id)) {
+      return c.json({ error: 'Invalid page id' }, 400)
+    }
+
+    const funded = getFundedPageToken(id)
+    if ('error' in funded) {
+      return c.json({ error: funded.error }, funded.status)
+    }
+
+    try {
+      const result = await executeTokenOptimize(funded.primary.token)
+      replacePageToken(id, {
+        token: result.token,
+        amountSats: result.amountSats,
+        unit: result.unit,
+        mint: result.mint,
+      })
+
+      const updated = getPageIfActive(id)
+      if (!updated) {
+        return c.json({ error: 'Page not found' }, 404)
+      }
+
+      const response: TokenOptimizeResult = {
+        page: rowToPublicPage(updated),
+        previousLength: result.previousLength,
+        newLength: result.newLength,
+        previousProofCount: result.previousProofCount,
+        newProofCount: result.newProofCount,
+        feeSats: result.feeSats,
+        reachedStaticQr: result.reachedStaticQr,
+        reachedEmoji: result.reachedEmoji,
+        reductionPercent: result.reductionPercent,
+        benefitSummary: result.benefitSummary,
+      }
+      return c.json(response)
+    } catch (err) {
+      const message =
+        err instanceof OptimizeError
+          ? err.message
+          : err instanceof Error
+            ? err.message
+            : 'Could not optimize token'
+      return c.json({ error: message }, 400)
+    }
+  })
+
   app.patch('/api/pages/:id/contact', async (c) => {
     const id = c.req.param('id')
     if (!isValidSlug(id)) {
@@ -412,6 +542,14 @@ export function createApp() {
         400,
       )
     }
+  })
+
+  app.get('/api/btc-usd', async (c) => {
+    const usd = await getBtcUsdPrice()
+    if (usd == null) {
+      return c.json({ error: 'BTC price unavailable' }, 503)
+    }
+    return c.json({ usd })
   })
 
   app.post('/api/lightning/invoice', async (c) => {

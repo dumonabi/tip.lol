@@ -1,24 +1,24 @@
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
-import { fundPage, getPage, updatePageContact } from '../lib/api'
+import { fundPage, getPage } from '../lib/api'
+import { resolveTokenFromInput } from '../../shared/emoji-token'
 import { formatDaysRemaining, formatExpiryDate, useDaysRemaining } from '../lib/expiry'
 import { fetchMintLabel, formatMintTitleName, formatMintHostname } from '../lib/mint-label'
 import { CashuProtocolBanner } from '../components/CashuProtocolBanner'
 import { scrollSectionToTop } from '../lib/scroll-section'
 import { SHOP_OPTIONS } from '../lib/spend-options'
-import { CLAIMED_PAGE_TTL_MS } from '../../shared/types'
 import { CashuClaimHero } from '../components/CashuClaimHero'
-import { CashuTokenInput } from '../components/CashuTokenInput'
+import { CashuTokenInput, type CashuTokenInputHandle } from '../components/CashuTokenInput'
 import { Collapsible } from '../components/Collapsible'
-import { NotifyFields } from '../components/NotifyFields'
 import { PartialBalanceNote } from '../components/PartialBalanceNote'
 import {
-  NotifyPanelIcon,
   PanelTitle,
   SpendPanelIcon,
+  ExchangePanelIcon,
 } from '../components/PanelIcons'
 import { SharePanel } from '../components/SharePanel'
 import { SpendLinks } from '../components/SpendLinks'
+import { ExchangeLinks } from '../components/ExchangeLinks'
 import { WalletResources } from '../components/WalletResources'
 import type { GiftPage } from '../../shared/types'
 
@@ -28,23 +28,24 @@ const RedeemToLightning = lazy(() =>
   })),
 )
 
-type AccordionSection = 'cashu' | 'share' | 'redeem' | 'shops' | 'contact'
+type AccordionSection = 'cashu' | 'share' | 'redeem' | 'shops' | 'exchange'
 
 export function GiftPageView() {
   const { id = '' } = useParams()
   const [page, setPage] = useState<GiftPage | null>(null)
   const [tokenInput, setTokenInput] = useState('')
-  const [email, setEmail] = useState('')
   const [loading, setLoading] = useState(true)
   const [funding, setFunding] = useState(false)
-  const [savingContact, setSavingContact] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  const [contactMsg, setContactMsg] = useState<string | null>(null)
+  const [fundError, setFundError] = useState<string | null>(null)
   const [copied, setCopied] = useState<'link' | 'emoji' | 'token' | null>(null)
+  const [showLoadedBanner, setShowLoadedBanner] = useState(false)
   const [openSection, setOpenSection] = useState<AccordionSection | null>('cashu')
   const [mintLabel, setMintLabel] = useState<string | null>(null)
   const sectionRefs = useRef<Partial<Record<AccordionSection, HTMLElement | null>>>({})
   const skipScrollOnMount = useRef(true)
+  const fundAttempt = useRef(0)
+  const tokenInputRef = useRef<CashuTokenInputHandle>(null)
 
   const bindSectionRef = useCallback(
     (section: AccordionSection) => (node: HTMLElement | null) => {
@@ -62,6 +63,12 @@ export function GiftPageView() {
     scrollSectionToTop(sectionRefs.current[openSection])
   }, [openSection])
 
+  useEffect(() => {
+    if (openSection !== 'cashu') {
+      void tokenInputRef.current?.stopScanning()
+    }
+  }, [openSection])
+
   const scrollIfRedeemOpen = useCallback(() => {
     if (openSection === 'redeem') {
       scrollSectionToTop(sectionRefs.current.redeem)
@@ -74,12 +81,6 @@ export function GiftPageView() {
     [page?.mint, page?.tokens],
   )
   const daysLeft = useDaysRemaining(page?.expiresAt ?? null)
-  const claimedRemoveAt = useMemo(
-    () =>
-      page?.claimedAt != null ? page.claimedAt + CLAIMED_PAGE_TTL_MS : null,
-    [page?.claimedAt],
-  )
-  const claimedDaysLeft = useDaysRemaining(claimedRemoveAt)
 
   useEffect(() => {
     let cancelled = false
@@ -90,7 +91,9 @@ export function GiftPageView() {
       .then((data) => {
         if (cancelled) return
         setPage(data)
-        setEmail(data.recipientEmail ?? '')
+        if (!data.claimed && !data.expired) {
+          setOpenSection('cashu')
+        }
       })
       .catch((err) => {
         if (!cancelled) {
@@ -105,6 +108,40 @@ export function GiftPageView() {
       cancelled = true
     }
   }, [id])
+
+  useEffect(() => {
+    if (!page || page.funded || page.claimed || page.expired) return
+
+    const token = resolveTokenFromInput(tokenInput)
+    if (!token) return
+
+    const attempt = ++fundAttempt.current
+    setFunding(true)
+    setFundError(null)
+
+    fundPage(id, { token })
+      .then((updated) => {
+        if (attempt !== fundAttempt.current) return
+        setPage(updated)
+        setTokenInput('')
+        setOpenSection('cashu')
+        setShowLoadedBanner(true)
+      })
+      .catch((err) => {
+        if (attempt !== fundAttempt.current) return
+        setTokenInput('')
+        setFundError(err instanceof Error ? err.message : 'Could not attach token')
+      })
+      .finally(() => {
+        if (attempt === fundAttempt.current) setFunding(false)
+      })
+  }, [tokenInput, id, page])
+
+  useEffect(() => {
+    if (!showLoadedBanner) return
+    const timer = window.setTimeout(() => setShowLoadedBanner(false), 30_000)
+    return () => window.clearTimeout(timer)
+  }, [showLoadedBanner])
 
   useEffect(() => {
     if (!mintUrl) {
@@ -127,45 +164,6 @@ export function GiftPageView() {
       cancelled = true
     }
   }, [mintUrl])
-
-  async function handleFund(e: React.FormEvent) {
-    e.preventDefault()
-    setFunding(true)
-    setError(null)
-    try {
-      const updated = await fundPage(id, {
-        token: tokenInput.trim(),
-      })
-      setPage(updated)
-      setTokenInput('')
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Could not attach token')
-    } finally {
-      setFunding(false)
-    }
-  }
-
-  async function saveContactSilently() {
-    const updated = await updatePageContact(id, {
-      recipientEmail: email.trim() || null,
-    })
-    setPage(updated)
-  }
-
-  async function handleSaveContact(e: React.FormEvent) {
-    e.preventDefault()
-    setSavingContact(true)
-    setContactMsg(null)
-    setError(null)
-    try {
-      await saveContactSilently()
-      setContactMsg('Saved (notifications coming soon).')
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Could not save contact')
-    } finally {
-      setSavingContact(false)
-    }
-  }
 
   async function copy(text: string, kind: 'link' | 'emoji' | 'token') {
     await navigator.clipboard.writeText(text)
@@ -207,31 +205,7 @@ export function GiftPageView() {
       <CashuProtocolBanner />
       {page.claimed ? (
         <section className="panel terminal-state claimed-state">
-          <p className="eyebrow">Gift</p>
           <h1>Already claimed</h1>
-          <p className="lede">
-            This Cashu gift was redeemed. The ecash is no longer available on
-            this page.
-          </p>
-          {page.amountSats != null && (
-            <p className="claimed-amount">
-              {page.amountSats.toLocaleString()} sats
-            </p>
-          )}
-          {page.memo && <p className="memo">“{page.memo}”</p>}
-          {page.claimedAt != null && (
-            <p className="hint compact">
-              Claimed on {formatExpiryDate(page.claimedAt)}
-            </p>
-          )}
-          {claimedDaysLeft != null && claimedDaysLeft > 0 && (
-            <p className="hint compact">
-              This page will be removed in {formatDaysRemaining(claimedDaysLeft)}
-            </p>
-          )}
-          <Link to="/" className="link-button primary terminal-cta">
-            Open a new gift page
-          </Link>
         </section>
       ) : page.expired ? (
         <section className="panel terminal-state">
@@ -244,128 +218,149 @@ export function GiftPageView() {
             Open a new gift page
           </Link>
         </section>
-      ) : !page.funded ? (
-        <section className="panel">
-          <h1>Load your Cashu tokens</h1>
-
-          <form onSubmit={handleFund} className="stack">
-            <CashuTokenInput value={tokenInput} onChange={setTokenInput} />
-
-            {error && <p className="error">{error}</p>}
-
-            <button
-              type="submit"
-              className="primary"
-              disabled={funding || !tokenInput.trim()}
-            >
-              {funding ? 'Publishing…' : 'Publish gift page'}
-            </button>
-          </form>
-        </section>
       ) : (
-        <>
-          <div className="gift-layout">
-          <Collapsible
-            title={
-              <PanelTitle>
-                Your <span className="btc-mark">₿</span> in{' '}
-                {mintTitleName ? (
-                  <span className="mint-mark">{mintTitleName}</span>
+        <div className="gift-layout">
+          {page.funded && showLoadedBanner && (
+            <p className="funded-loaded-banner" role="status">
+              Loaded
+            </p>
+          )}
+          {!page.funded ? (
+            <>
+              <Collapsible
+                title={<PanelTitle>Load your Cashu token</PanelTitle>}
+                open={openSection === 'cashu'}
+                onToggle={() => toggleSection('cashu')}
+                rootRef={bindSectionRef('cashu')}
+              >
+                {funding ? (
+                  <p className="status">Publishing your gift…</p>
                 ) : (
-                  '…'
+                  <>
+                    <CashuTokenInput
+                      ref={tokenInputRef}
+                      value={tokenInput}
+                      onChange={setTokenInput}
+                    />
+                    {fundError && <p className="error">{fundError}</p>}
+                  </>
                 )}
-              </PanelTitle>
-            }
-            open={openSection === 'cashu'}
-            onToggle={() => toggleSection('cashu')}
-            rootRef={bindSectionRef('cashu')}
-          >
-            <CashuClaimHero
-              key={tokenVersionKey}
-              page={page}
-              onCopyToken={(token) => copy(token, 'token')}
-              onCopyEmoji={(emoji) => copy(emoji, 'emoji')}
-              copiedToken={copied === 'token'}
-              copiedEmoji={copied === 'emoji'}
-            />
-          </Collapsible>
+              </Collapsible>
 
-          <Collapsible
-            title={
-              <PanelTitle>
-                Redeem to <span className="btc-mark">₿</span>{' '}
-                <span className="lightning-mark" aria-hidden>
-                  ⚡
-                </span>
-              </PanelTitle>
-            }
-            open={openSection === 'redeem'}
-            onToggle={() => toggleSection('redeem')}
-            rootRef={bindSectionRef('redeem')}
-          >
-            {page.tokens[0] && (
-              <Suspense fallback={<p className="hint compact">Loading redeem…</p>}>
-                <RedeemToLightning
-                  key={tokenVersionKey}
-                  pageId={id}
-                  token={page.tokens[0].token}
-                  giftBalanceSats={page.amountSats ?? page.tokens[0].amountSats}
-                  onRedeemed={(updated) => setPage(updated)}
-                  onReady={scrollIfRedeemOpen}
-                />
-              </Suspense>
-            )}
-          </Collapsible>
-
-          <Collapsible
-            title={
-              <PanelTitle>
-                <SpendPanelIcon />
-                Shop
-              </PanelTitle>
-            }
-            open={openSection === 'shops'}
-            onToggle={() => toggleSection('shops')}
-            rootRef={bindSectionRef('shops')}
-          >
-            <PartialBalanceNote />
-            <SpendLinks options={SHOP_OPTIONS} />
-          </Collapsible>
-
-          <Collapsible
-            title={
-              <PanelTitle>
-                <NotifyPanelIcon />
-                Notify me
-              </PanelTitle>
-            }
-            open={openSection === 'contact'}
-            onToggle={() => toggleSection('contact')}
-            rootRef={bindSectionRef('contact')}
-          >
-            <form onSubmit={handleSaveContact} className="stack">
-              <NotifyFields
-                email={email}
-                onEmailChange={setEmail}
-                disabled={savingContact}
+              <SharePanel
+                pageUrl={pageUrl}
+                onCopyLink={() => copy(pageUrl, 'link')}
+                linkCopied={copied === 'link'}
+                open={openSection === 'share'}
+                onToggle={() => toggleSection('share')}
+                rootRef={bindSectionRef('share')}
               />
-              {contactMsg && <p className="success">{contactMsg}</p>}
-              <button type="submit" className="ghost" disabled={savingContact}>
-                {savingContact ? 'Saving…' : 'Save'}
-              </button>
-            </form>
-          </Collapsible>
+            </>
+          ) : (
+            <>
+              <Collapsible
+                title={
+                  <PanelTitle>
+                    Your <span className="btc-mark">₿</span>{' '}
+                    {mintTitleName ? (
+                      <>
+                        custodied by <span className="mint-mark">{mintTitleName}</span>
+                      </>
+                    ) : (
+                      'custodied by …'
+                    )}
+                  </PanelTitle>
+                }
+                open={openSection === 'cashu'}
+                onToggle={() => toggleSection('cashu')}
+                rootRef={bindSectionRef('cashu')}
+              >
+                <CashuClaimHero
+                  key={tokenVersionKey}
+                  page={page}
+                  onCopyToken={(token) => copy(token, 'token')}
+                  onCopyEmoji={(emoji) => copy(emoji, 'emoji')}
+                  onOptimized={(updated) => setPage(updated)}
+                  copiedToken={copied === 'token'}
+                  copiedEmoji={copied === 'emoji'}
+                />
+              </Collapsible>
 
-          <SharePanel
-            pageUrl={pageUrl}
-            onCopyLink={() => copy(pageUrl, 'link')}
-            linkCopied={copied === 'link'}
-            open={openSection === 'share'}
-            onToggle={() => toggleSection('share')}
-            rootRef={bindSectionRef('share')}
-          />
+              <SharePanel
+                pageUrl={pageUrl}
+                iconActions={page.funded}
+                onCopyLink={() => copy(pageUrl, 'link')}
+                linkCopied={copied === 'link'}
+                open={openSection === 'share'}
+                onToggle={() => toggleSection('share')}
+                rootRef={bindSectionRef('share')}
+              />
+            </>
+          )}
 
-          {page.expiresAt && (
+          {page.funded && (
+            <Collapsible
+              title={
+                <PanelTitle>
+                  Redeem to <span className="btc-mark">₿</span>{' '}
+                  <span className="lightning-mark" aria-hidden>
+                    ⚡
+                  </span>
+                </PanelTitle>
+              }
+              open={openSection === 'redeem'}
+              onToggle={() => toggleSection('redeem')}
+              rootRef={bindSectionRef('redeem')}
+            >
+              {page.tokens[0] && (
+                <Suspense fallback={<p className="hint compact">Loading redeem…</p>}>
+                  <RedeemToLightning
+                    key={tokenVersionKey}
+                    pageId={id}
+                    token={page.tokens[0].token}
+                    giftBalanceSats={page.amountSats ?? page.tokens[0].amountSats}
+                    onRedeemed={(updated) => setPage(updated)}
+                    onReady={scrollIfRedeemOpen}
+                  />
+                </Suspense>
+              )}
+            </Collapsible>
+          )}
+
+          {page.funded && (
+            <Collapsible
+              title={
+                <PanelTitle>
+                  <SpendPanelIcon />
+                  Shop
+                </PanelTitle>
+              }
+              open={openSection === 'shops'}
+              onToggle={() => toggleSection('shops')}
+              rootRef={bindSectionRef('shops')}
+            >
+              <PartialBalanceNote partiallySpent={page.partiallySpent} />
+              <SpendLinks options={SHOP_OPTIONS} />
+            </Collapsible>
+          )}
+
+          {page.funded && (
+            <Collapsible
+              title={
+                <PanelTitle>
+                  <ExchangePanelIcon />
+                  Exchange
+                </PanelTitle>
+              }
+              open={openSection === 'exchange'}
+              onToggle={() => toggleSection('exchange')}
+              rootRef={bindSectionRef('exchange')}
+            >
+              <ExchangeLinks />
+            </Collapsible>
+          )}
+
+          {page.funded && page.expiresAt && (
             <div className={`expiry-footer ${page.expired ? 'expired' : ''}`}>
               {page.expired ? (
                 <>
@@ -383,7 +378,6 @@ export function GiftPageView() {
 
           <WalletResources />
         </div>
-        </>
       )}
     </div>
   )

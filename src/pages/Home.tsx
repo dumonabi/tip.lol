@@ -17,6 +17,10 @@ export function Home() {
       })
       .catch((err) => {
         if (!cancelled) {
+          if (err instanceof Error && err.name === 'TimeoutError') {
+            setError('The server took too long to respond. Please try again.')
+            return
+          }
           setError(
             err instanceof Error ? err.message : 'Could not open a gift page',
           )

@@ -30,7 +30,7 @@ npm run dev
 | Wallet download buttons above the fold | ✅ |
 | 365-day expiry from funding | ✅ |
 | Auto-delete abandoned / expired pages | ✅ |
-| “Already claimed” grace period (7 days) | ✅ |
+| “Already claimed” grace period (14 days) | ✅ |
 | Live countdown (`364 days left`, …) | ✅ |
 | Mint balance sync (partial spend / external redeem) | ✅ |
 | Email notification | 🔜 Saved, not sent yet |
@@ -49,7 +49,7 @@ npm run dev
 - The link **is** the key — anyone with it can view and copy tokens.
 - Pages expire **365 days** after funding.
 - **Unpublished** pages (no Cashu attached) are removed after **1 hour**.
-- **Claimed** pages show an “already claimed” message for **7 days**, then are deleted.
+- **Claimed** pages show an “already claimed” message for **14 days**, then are deleted.
 - **Expired** or **token-less** pages are deleted automatically (on access and hourly cleanup).
 - Tokens are stored in SQLite (`data/gift.db`) on your server.
 

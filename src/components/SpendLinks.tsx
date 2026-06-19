@@ -1,4 +1,5 @@
 import type { SpendOption } from '../../shared/types'
+import { RedeemMenuHint } from './RedeemMenuHint'
 
 type Props = {
   options: SpendOption[]
@@ -16,12 +17,7 @@ export function SpendLinks({ options }: Props) {
               <strong>{item.name}</strong>
             </a>
             <p className="spend-desc">
-              {item.description}{' '}
-              Redeem to <span className="btc-mark">₿</span>{' '}
-              <span className="lightning-mark" aria-hidden>
-                ⚡
-              </span>
-              .
+              {item.description} <RedeemMenuHint />
             </p>
           </div>
         </li>

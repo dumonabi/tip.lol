@@ -4,6 +4,8 @@ import type {
   GiftPage,
   ResolveLightningInvoiceResponse,
   SyncRedeemRequest,
+  TokenOptimizePreview,
+  TokenOptimizeResult,
   UpdateContactRequest,
 } from '../../shared/types'
 
@@ -22,6 +24,7 @@ export async function createPage(): Promise<CreatePageResponse> {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({}),
+    signal: AbortSignal.timeout(35_000),
   })
   if (!res.ok) throw new Error(await parseError(res))
   return res.json()
@@ -84,4 +87,40 @@ export async function updatePageContact(
   })
   if (!res.ok) throw new Error(await parseError(res))
   return res.json()
+}
+
+export async function previewTokenOptimize(
+  id: string,
+): Promise<TokenOptimizePreview> {
+  const res = await fetch(`/api/pages/${id}/optimize-token/preview`, {
+    method: 'POST',
+  })
+  if (!res.ok) throw new Error(await parseError(res))
+  return res.json()
+}
+
+export async function optimizePageToken(id: string): Promise<TokenOptimizeResult> {
+  const res = await fetch(`/api/pages/${id}/optimize-token`, {
+    method: 'POST',
+  })
+  if (!res.ok) throw new Error(await parseError(res))
+  return res.json()
+}
+
+export async function fetchPageTokenProofs(id: string): Promise<number[]> {
+  const res = await fetch(`/api/pages/${id}/token-proofs`)
+  if (!res.ok) throw new Error(await parseError(res))
+  const data = (await res.json()) as { proofSats: number[] }
+  return data.proofSats
+}
+
+export async function fetchBtcUsdPrice(): Promise<number | null> {
+  try {
+    const res = await fetch('/api/btc-usd')
+    if (!res.ok) return null
+    const data = (await res.json()) as { usd?: number }
+    return typeof data.usd === 'number' && Number.isFinite(data.usd) ? data.usd : null
+  } catch {
+    return null
+  }
 }

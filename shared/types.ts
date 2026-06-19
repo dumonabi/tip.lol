@@ -4,7 +4,10 @@ export const PAGE_TTL_MS = 365 * 24 * 60 * 60 * 1000
 export const UNFUNDED_PAGE_TTL_MS = 60 * 60 * 1000
 
 /** Claimed pages stay visible with a message for this long, then are deleted */
-export const CLAIMED_PAGE_TTL_MS = 7 * 24 * 60 * 60 * 1000
+export const CLAIMED_PAGE_TTL_MS = 14 * 24 * 60 * 60 * 1000
+
+/** Conservative limit for static QR (level M) */
+export const MAX_STATIC_QR_TOKEN_LENGTH = 1400
 
 export type StoredToken = {
   token: string
@@ -21,6 +24,8 @@ export type GiftPage = {
   expired: boolean
   claimed: boolean
   amountSats: number | null
+  initialAmountSats: number | null
+  partiallySpent: boolean
   unit: string | null
   mint: string | null
   tokens: StoredToken[]
@@ -64,6 +69,39 @@ export type UpdateContactRequest = {
 
 export type SyncRedeemRequest = {
   remainingToken?: string | null
+}
+
+export type TokenOptimizePreview = {
+  currentLength: number
+  currentProofCount: number
+  currentProofSats: number[]
+  estimatedLength: number
+  estimatedProofCount: number
+  estimatedProofSats: number[]
+  feeSats: number
+  costLabel: string
+  swapRequired: boolean
+  currentlyStaticQr: boolean
+  currentlyEmoji: boolean
+  canReachStaticQr: boolean
+  canReachEmoji: boolean
+  estimatedReductionPercent: number
+  worthOptimizing: boolean
+  benefitSummary: string | null
+  alreadyOptimal: boolean
+}
+
+export type TokenOptimizeResult = {
+  page: GiftPage
+  previousLength: number
+  newLength: number
+  previousProofCount: number
+  newProofCount: number
+  feeSats: number
+  reachedStaticQr: boolean
+  reachedEmoji: boolean
+  reductionPercent: number
+  benefitSummary: string | null
 }
 
 export type ResolveLightningInvoiceRequest = {

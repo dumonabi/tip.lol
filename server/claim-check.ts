@@ -93,3 +93,11 @@ export async function areAllTokensSpent(
   if (!primary) return null
   return isTokenFullySpent(primary.token)
 }
+
+/** Individual proof amounts in sats, largest first. */
+export async function listTokenProofSats(tokenString: string): Promise<number[]> {
+  const meta = getTokenMetadata(tokenString)
+  const wallet = await getWallet(meta.mint, meta.unit)
+  const { proofs } = wallet.decodeToken(tokenString)
+  return proofs.map((proof) => proof.amount.toNumber()).sort((a, b) => b - a)
+}
