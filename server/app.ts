@@ -718,19 +718,19 @@ export function createApp() {
 
       const newId = makeSlug()
       const detached = detachCollectionTokenToNewGift(id, newId, tokenIndex)
-      if (!detached.ok) {
+      if (detached.ok === false) {
+        const { reason } = detached
         const message =
-          detached.reason === 'invalid_token'
+          reason === 'invalid_token'
             ? 'Token not found in collection'
-            : detached.reason === 'not_collection'
+            : reason === 'not_collection'
               ? 'This page is not a token collection'
-              : detached.reason === 'expired'
+              : reason === 'expired'
                 ? 'This page has expired'
-                : detached.reason === 'claimed'
+                : reason === 'claimed'
                   ? 'This gift was already claimed'
                   : 'Could not open token as its own page'
-        const status =
-          detached.reason === 'expired' || detached.reason === 'claimed' ? 410 : 409
+        const status = reason === 'expired' || reason === 'claimed' ? 410 : 409
         return c.json({ error: message }, status)
       }
 
