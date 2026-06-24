@@ -57,6 +57,12 @@ ensureColumn('notify_via_whatsapp', 'notify_via_whatsapp INTEGER DEFAULT 0')
 ensureColumn('claimed_at', 'claimed_at INTEGER')
 ensureColumn('claim_check_at', 'claim_check_at INTEGER')
 ensureColumn('initial_amount_sats', 'initial_amount_sats INTEGER')
+ensureColumn('secure_quote_json', 'secure_quote_json TEXT')
+ensureColumn('secure_quote_at', 'secure_quote_at INTEGER')
+ensureColumn('secure_quote_token_fp', 'secure_quote_token_fp TEXT')
+ensureColumn('page_kind', "page_kind TEXT NOT NULL DEFAULT 'gift'")
+ensureColumn('source_page_id', 'source_page_id TEXT')
+ensureColumn('access_mode', "access_mode TEXT NOT NULL DEFAULT 'link'")
 
 db.exec(
   `UPDATE gift_pages
@@ -83,6 +89,12 @@ export type GiftPageRow = {
   claimed_at: number | null
   claim_check_at: number | null
   initial_amount_sats: number | null
+  secure_quote_json: string | null
+  secure_quote_at: number | null
+  secure_quote_token_fp: string | null
+  page_kind: string | null
+  source_page_id: string | null
+  access_mode: string | null
 }
 
 function parseTokens(row: GiftPageRow): StoredToken[] {
@@ -107,6 +119,14 @@ function parseTokens(row: GiftPageRow): StoredToken[] {
   return []
 }
 
+function clearSecureQuoteCache(pageId: string): void {
+  db.prepare(
+    `UPDATE gift_pages
+     SET secure_quote_json = NULL, secure_quote_at = NULL, secure_quote_token_fp = NULL
+     WHERE id = ?`,
+  ).run(pageId)
+}
+
 function persistTokens(id: string, tokens: StoredToken[]): void {
   const single = tokens.slice(0, 1)
   const entry = single[0]
@@ -122,6 +142,22 @@ function persistTokens(id: string, tokens: StoredToken[]): void {
     entry?.mint ?? null,
     id,
   )
+  clearSecureQuoteCache(id)
+}
+
+export function convertCollectionToGift(
+  id: string,
+  entry: Omit<StoredToken, 'addedAt'>,
+): void {
+  const row = getPage(id)
+  const addedAt = row ? parseTokens(row)[0]?.addedAt ?? Date.now() : Date.now()
+  persistTokens(id, [{ ...entry, addedAt }])
+  db.prepare(
+    `UPDATE gift_pages
+     SET page_kind = 'gift', source_page_id = NULL
+     WHERE id = ?`,
+  ).run(id)
+  clearSecureQuoteCache(id)
 }
 
 export function insertPage(
@@ -153,14 +189,123 @@ export function getPage(id: string): GiftPageRow | undefined {
     | undefined
 }
 
+export function getPageKind(row: GiftPageRow): 'gift' | 'collection' {
+  return row.page_kind === 'collection' ? 'collection' : 'gift'
+}
+
+export function getPageAccessMode(row: GiftPageRow): 'link' | 'seed' {
+  return row.access_mode === 'seed' ? 'seed' : 'link'
+}
+
 export function getStoredTokens(row: GiftPageRow): StoredToken[] {
   const tokens = parseTokens(row)
+  if (getPageKind(row) === 'collection') return tokens
   return tokens.length > 0 ? [tokens[0]] : []
+}
+
+export function persistCollectionTokens(
+  id: string,
+  tokens: StoredToken[],
+  sourcePageId: string | null,
+): void {
+  const totalSats = tokens.reduce((sum, entry) => sum + entry.amountSats, 0)
+  const first = tokens[0]
+  db.prepare(
+    `UPDATE gift_pages
+     SET page_kind = 'collection',
+         source_page_id = ?,
+         tokens_json = ?,
+         token = NULL,
+         amount_sats = ?,
+         unit = ?,
+         mint = ?,
+         access_mode = COALESCE(access_mode, 'link')
+     WHERE id = ?`,
+  ).run(
+    sourcePageId,
+    JSON.stringify(tokens),
+    totalSats,
+    first?.unit ?? 'sat',
+    first?.mint ?? null,
+    id,
+  )
+  clearSecureQuoteCache(id)
+}
+
+export function replaceCollectionTokens(id: string, tokens: StoredToken[]): void {
+  const row = getPage(id)
+  if (!row) return
+
+  if (tokens.length === 0) {
+    clearPageTokenAndClaim(id, Date.now())
+    return
+  }
+
+  persistCollectionTokens(id, tokens, row.source_page_id)
+}
+
+export function convertGiftToCollection(
+  id: string,
+  entries: Omit<StoredToken, 'addedAt'>[],
+): { ok: boolean; reason?: string } {
+  const row = getPage(id)
+  if (!row) return { ok: false, reason: 'not_found' }
+  if (isExpired(row)) return { ok: false, reason: 'expired' }
+  if (getPageKind(row) === 'collection') {
+    return { ok: false, reason: 'already_collection' }
+  }
+  const existing = parseTokens(row)
+  if (existing.length === 0) {
+    return { ok: false, reason: 'not_funded' }
+  }
+
+  const now = Date.now()
+  const tokens: StoredToken[] = entries.map((entry) => ({
+    ...entry,
+    addedAt: now,
+  }))
+  persistCollectionTokens(id, tokens, null)
+  return { ok: true }
+}
+
+export function fundCollectionPage(
+  id: string,
+  entries: Omit<StoredToken, 'addedAt'>[],
+  sourcePageId: string,
+): { ok: boolean; reason?: string } {
+  const row = getPage(id)
+  if (!row) return { ok: false, reason: 'not_found' }
+  if (isExpired(row)) return { ok: false, reason: 'expired' }
+
+  const existing = parseTokens(row)
+  if (existing.length > 0) {
+    return { ok: false, reason: 'already_funded' }
+  }
+
+  const now = Date.now()
+  const tokens: StoredToken[] = entries.map((entry) => ({
+    ...entry,
+    addedAt: now,
+  }))
+  const totalSats = tokens.reduce((sum, entry) => sum + entry.amountSats, 0)
+  const expiresAt = computeExpiresAt(now)
+
+  persistCollectionTokens(id, tokens, sourcePageId)
+  db.prepare(
+    `UPDATE gift_pages
+     SET funded_at = COALESCE(funded_at, ?),
+         expires_at = ?,
+         initial_amount_sats = COALESCE(initial_amount_sats, ?)
+     WHERE id = ?`,
+  ).run(now, expiresAt, totalSats, id)
+
+  return { ok: true }
 }
 
 export function normalizeToSingleToken(id: string): void {
   const row = getPage(id)
   if (!row) return
+  if (getPageKind(row) === 'collection') return
   const tokens = parseTokens(row)
   if (tokens.length <= 1) return
   persistTokens(id, [tokens[0]])
@@ -175,11 +320,24 @@ export function replacePageToken(
   persistTokens(id, [{ ...entry, addedAt }])
 }
 
+export function vacatePageFunding(id: string): boolean {
+  const result = db
+    .prepare(
+      `UPDATE gift_pages
+       SET tokens_json = '[]', token = NULL, amount_sats = 0,
+           secure_quote_json = NULL, secure_quote_at = NULL, secure_quote_token_fp = NULL
+       WHERE id = ?`,
+    )
+    .run(id)
+  return result.changes > 0
+}
+
 export function clearPageTokenAndClaim(id: string, claimedAt = Date.now()): void {
   markPageClaimed(id, claimedAt)
   db.prepare(
     `UPDATE gift_pages
-     SET tokens_json = '[]', token = NULL, amount_sats = 0
+     SET tokens_json = '[]', token = NULL, amount_sats = 0,
+         secure_quote_json = NULL, secure_quote_at = NULL, secure_quote_token_fp = NULL
      WHERE id = ?`,
   ).run(id)
 }
@@ -307,6 +465,85 @@ export function syncPrimaryTokenAfterRedeem(
   }
 
   clearPageTokenAndClaim(id, now)
+  return { ok: true }
+}
+
+export function syncCollectionTokenAfterRedeem(
+  id: string,
+  tokenIndex: number,
+  remaining: Omit<StoredToken, 'addedAt'> | null,
+): { ok: boolean; reason?: string } {
+  const row = getPage(id)
+  if (!row) return { ok: false, reason: 'not_found' }
+  if (getPageKind(row) !== 'collection') {
+    return syncPrimaryTokenAfterRedeem(id, remaining)
+  }
+  if (isExpired(row)) return { ok: false, reason: 'expired' }
+  if (isClaimed(row)) return { ok: false, reason: 'claimed' }
+
+  const tokens = parseTokens(row)
+  if (tokens.length === 0) return { ok: false, reason: 'empty' }
+  if (!Number.isInteger(tokenIndex) || tokenIndex < 0 || tokenIndex >= tokens.length) {
+    return { ok: false, reason: 'invalid_token' }
+  }
+
+  if (remaining) {
+    const updated = [...tokens]
+    updated[tokenIndex] = {
+      ...remaining,
+      addedAt: tokens[tokenIndex]!.addedAt,
+    }
+    replaceCollectionTokens(id, updated)
+    return { ok: true }
+  }
+
+  replaceCollectionTokens(
+    id,
+    tokens.filter((_, index) => index !== tokenIndex),
+  )
+  return { ok: true }
+}
+
+export function detachCollectionTokenToNewGift(
+  collectionId: string,
+  newId: string,
+  tokenIndex: number,
+): { ok: true } | { ok: false; reason: string } {
+  const row = getPage(collectionId)
+  if (!row) return { ok: false, reason: 'not_found' }
+  if (getPageKind(row) !== 'collection') return { ok: false, reason: 'not_collection' }
+  if (isExpired(row)) return { ok: false, reason: 'expired' }
+  if (isClaimed(row)) return { ok: false, reason: 'claimed' }
+
+  const tokens = parseTokens(row)
+  if (!Number.isInteger(tokenIndex) || tokenIndex < 0 || tokenIndex >= tokens.length) {
+    return { ok: false, reason: 'invalid_token' }
+  }
+
+  const entry = tokens[tokenIndex]!
+
+  insertPage(newId, {
+    memo: row.memo,
+    recipientEmail: row.recipient_email,
+    recipientWhatsapp: row.recipient_whatsapp,
+    notifyViaWhatsapp: Boolean(row.notify_via_whatsapp),
+  })
+
+  persistTokens(newId, [{ ...entry, addedAt: entry.addedAt }])
+  db.prepare(
+    `UPDATE gift_pages
+     SET page_kind = 'gift',
+         funded_at = ?,
+         expires_at = ?,
+         initial_amount_sats = ?
+     WHERE id = ?`,
+  ).run(row.funded_at ?? Date.now(), row.expires_at, entry.amountSats, newId)
+
+  replaceCollectionTokens(
+    collectionId,
+    tokens.filter((_, index) => index !== tokenIndex),
+  )
+
   return { ok: true }
 }
 

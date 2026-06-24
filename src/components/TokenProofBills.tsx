@@ -8,6 +8,7 @@ type Props = {
   proofSats: number[] | null
   loading: boolean
   error: boolean
+  errorMessage?: string
   align?: 'start' | 'end' | 'center'
   showTotalCount?: boolean
 }
@@ -16,6 +17,7 @@ export function TokenProofBills({
   proofSats,
   loading,
   error,
+  errorMessage,
   align = 'start',
   showTotalCount = false,
 }: Props) {
@@ -24,7 +26,11 @@ export function TokenProofBills({
   }
 
   if (error || !proofSats || proofSats.length === 0) {
-    return <p className="token-proof-status">Proof details unavailable</p>
+    return (
+      <p className="token-proof-status">
+        {errorMessage ?? 'Proof details unavailable'}
+      </p>
+    )
   }
 
   const groups = groupProofDenominations(proofSats)

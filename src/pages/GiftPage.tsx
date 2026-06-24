@@ -2,21 +2,24 @@ import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } fro
 import { Link, useParams } from 'react-router-dom'
 import { fundPage, getPage } from '../lib/api'
 import { resolveTokenFromInput } from '../../shared/emoji-token'
-import { formatDaysRemaining, formatExpiryDate, useDaysRemaining } from '../lib/expiry'
+import { formatExpiryDate, formatPageValidUntil } from '../lib/expiry'
 import { fetchMintLabel, formatMintTitleName, formatMintHostname } from '../lib/mint-label'
 import { CashuProtocolBanner } from '../components/CashuProtocolBanner'
 import { scrollSectionToTop } from '../lib/scroll-section'
 import { SHOP_OPTIONS } from '../lib/spend-options'
 import { CashuClaimHero } from '../components/CashuClaimHero'
+import { CollectionHero } from '../components/CollectionHero'
+import { MergeCollectionButton } from '../components/MergeCollectionButton'
 import { CashuTokenInput, type CashuTokenInputHandle } from '../components/CashuTokenInput'
 import { Collapsible } from '../components/Collapsible'
+import { TokenCompositionPanel } from '../components/TokenCompositionPanel'
 import { PartialBalanceNote } from '../components/PartialBalanceNote'
 import {
+  InfoIcon,
   PanelTitle,
   SpendPanelIcon,
   ExchangePanelIcon,
 } from '../components/PanelIcons'
-import { SharePanel } from '../components/SharePanel'
 import { SpendLinks } from '../components/SpendLinks'
 import { ExchangeLinks } from '../components/ExchangeLinks'
 import { WalletResources } from '../components/WalletResources'
@@ -28,17 +31,20 @@ const RedeemToLightning = lazy(() =>
   })),
 )
 
-type AccordionSection = 'cashu' | 'share' | 'redeem' | 'shops' | 'exchange'
+type AccordionSection = 'cashu' | 'composition' | 'redeem' | 'shops' | 'exchange'
 
 export function GiftPageView() {
   const { id = '' } = useParams()
+
   const [page, setPage] = useState<GiftPage | null>(null)
   const [tokenInput, setTokenInput] = useState('')
   const [loading, setLoading] = useState(true)
   const [funding, setFunding] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [fundError, setFundError] = useState<string | null>(null)
-  const [copied, setCopied] = useState<'link' | 'emoji' | 'token' | null>(null)
+  const [copied, setCopied] = useState<'emoji' | 'token' | null>(null)
+  const [copiedCollectionIndex, setCopiedCollectionIndex] = useState<number | null>(null)
+  const [copiedCollectionEmojiIndex, setCopiedCollectionEmojiIndex] = useState<number | null>(null)
   const [showLoadedBanner, setShowLoadedBanner] = useState(false)
   const [openSection, setOpenSection] = useState<AccordionSection | null>('cashu')
   const [mintLabel, setMintLabel] = useState<string | null>(null)
@@ -75,12 +81,10 @@ export function GiftPageView() {
     }
   }, [openSection])
 
-  const pageUrl = useMemo(() => `${window.location.origin}/g/${id}`, [id])
   const mintUrl = useMemo(
     () => page?.mint ?? page?.tokens[0]?.mint ?? null,
     [page?.mint, page?.tokens],
   )
-  const daysLeft = useDaysRemaining(page?.expiresAt ?? null)
 
   useEffect(() => {
     let cancelled = false
@@ -165,7 +169,21 @@ export function GiftPageView() {
     }
   }, [mintUrl])
 
-  async function copy(text: string, kind: 'link' | 'emoji' | 'token') {
+  async function copyCollectionToken(text: string, index: number) {
+    await navigator.clipboard.writeText(text)
+    setCopiedCollectionIndex(index)
+    setCopiedCollectionEmojiIndex(null)
+    setTimeout(() => setCopiedCollectionIndex(null), 2000)
+  }
+
+  async function copyCollectionEmoji(text: string, index: number) {
+    await navigator.clipboard.writeText(text)
+    setCopiedCollectionEmojiIndex(index)
+    setCopiedCollectionIndex(null)
+    setTimeout(() => setCopiedCollectionEmojiIndex(null), 2000)
+  }
+
+  async function copy(text: string, kind: 'emoji' | 'token') {
     await navigator.clipboard.writeText(text)
     setCopied(kind)
     setTimeout(() => setCopied(null), 2000)
@@ -193,12 +211,27 @@ export function GiftPageView() {
 
   if (!page) return null
 
-  const daysLabel = formatDaysRemaining(daysLeft)
   const expiryDate = formatExpiryDate(page.expiresAt)
+  const validUntilLabel = formatPageValidUntil(page.expiresAt)
   const tokenVersionKey = page.tokens
     .map((t) => `${t.addedAt}:${t.amountSats}`)
     .join('|')
   const mintTitleName = mintLabel ? formatMintTitleName(mintLabel) : null
+  const isCollection = page.kind === 'collection'
+  const showGiftPanels = page.funded && !isCollection
+
+  const heroTitle = (
+    <PanelTitle>
+      Your <span className="btc-mark">₿</span>{' '}
+      {mintTitleName ? (
+        <>
+          custodied by <span className="mint-mark">{mintTitleName}</span>
+        </>
+      ) : (
+        'custodied by …'
+      )}
+    </PanelTitle>
+  )
 
   return (
     <div className="gift-layout">
@@ -226,79 +259,84 @@ export function GiftPageView() {
             </p>
           )}
           {!page.funded ? (
-            <>
-              <Collapsible
-                title={<PanelTitle>Load your Cashu token</PanelTitle>}
-                open={openSection === 'cashu'}
-                onToggle={() => toggleSection('cashu')}
-                rootRef={bindSectionRef('cashu')}
-              >
-                {funding ? (
-                  <p className="status">Publishing your gift…</p>
-                ) : (
-                  <>
-                    <CashuTokenInput
-                      ref={tokenInputRef}
-                      value={tokenInput}
-                      onChange={setTokenInput}
-                    />
-                    {fundError && <p className="error">{fundError}</p>}
-                  </>
-                )}
-              </Collapsible>
-
-              <SharePanel
-                pageUrl={pageUrl}
-                onCopyLink={() => copy(pageUrl, 'link')}
-                linkCopied={copied === 'link'}
-                open={openSection === 'share'}
-                onToggle={() => toggleSection('share')}
-                rootRef={bindSectionRef('share')}
-              />
-            </>
+            <section
+              className="load-token-section"
+              ref={bindSectionRef('cashu')}
+              aria-label="Load Cashu token"
+            >
+              <h1 className="load-token-title">Load your Cashu token</h1>
+              <div className="load-token-guide claim-hero-info-panel">
+                <p className="load-token-guide-lede">
+                  Display it on a webpage whose URL effectively serves as the password:
+                  long, random, and virtually impossible to guess.
+                </p>
+              </div>
+              {funding ? (
+                <p className="status">Publishing your gift…</p>
+              ) : (
+                <>
+                  <CashuTokenInput
+                    ref={tokenInputRef}
+                    value={tokenInput}
+                    onChange={setTokenInput}
+                  />
+                  {fundError && <p className="error">{fundError}</p>}
+                </>
+              )}
+            </section>
           ) : (
             <>
               <Collapsible
-                title={
-                  <PanelTitle>
-                    Your <span className="btc-mark">₿</span>{' '}
-                    {mintTitleName ? (
-                      <>
-                        custodied by <span className="mint-mark">{mintTitleName}</span>
-                      </>
-                    ) : (
-                      'custodied by …'
-                    )}
-                  </PanelTitle>
-                }
+                title={heroTitle}
                 open={openSection === 'cashu'}
                 onToggle={() => toggleSection('cashu')}
                 rootRef={bindSectionRef('cashu')}
               >
-                <CashuClaimHero
-                  key={tokenVersionKey}
-                  page={page}
-                  onCopyToken={(token) => copy(token, 'token')}
-                  onCopyEmoji={(emoji) => copy(emoji, 'emoji')}
-                  onOptimized={(updated) => setPage(updated)}
-                  copiedToken={copied === 'token'}
-                  copiedEmoji={copied === 'emoji'}
-                />
+                {isCollection ? (
+                  <CollectionHero
+                    key={tokenVersionKey}
+                    page={page}
+                    onCopyToken={copyCollectionToken}
+                    onCopyEmoji={copyCollectionEmoji}
+                    copiedTokenIndex={copiedCollectionIndex}
+                    copiedEmojiIndex={copiedCollectionEmojiIndex}
+                    onCollectionUpdated={setPage}
+                  />
+                ) : (
+                  <CashuClaimHero
+                    key={tokenVersionKey}
+                    page={page}
+                    onCopyToken={(token) => copy(token, 'token')}
+                    onCopyEmoji={(emoji) => copy(emoji, 'emoji')}
+                    copiedToken={copied === 'token'}
+                    copiedEmoji={copied === 'emoji'}
+                  />
+                )}
               </Collapsible>
 
-              <SharePanel
-                pageUrl={pageUrl}
-                iconActions={page.funded}
-                onCopyLink={() => copy(pageUrl, 'link')}
-                linkCopied={copied === 'link'}
-                open={openSection === 'share'}
-                onToggle={() => toggleSection('share')}
-                rootRef={bindSectionRef('share')}
-              />
+              {showGiftPanels && (
+                <Collapsible
+                  title={
+                    <PanelTitle>
+                      <InfoIcon className="panel-icon" />
+                      Token composition
+                    </PanelTitle>
+                  }
+                  open={openSection === 'composition'}
+                  onToggle={() => toggleSection('composition')}
+                  rootRef={bindSectionRef('composition')}
+                >
+                  <TokenCompositionPanel
+                    key={tokenVersionKey}
+                    page={page}
+                    onPageUpdated={setPage}
+                  />
+                </Collapsible>
+              )}
             </>
           )}
 
-          {page.funded && (
+          {showGiftPanels && (
             <Collapsible
               title={
                 <PanelTitle>
@@ -327,7 +365,7 @@ export function GiftPageView() {
             </Collapsible>
           )}
 
-          {page.funded && (
+          {showGiftPanels && (
             <Collapsible
               title={
                 <PanelTitle>
@@ -344,7 +382,7 @@ export function GiftPageView() {
             </Collapsible>
           )}
 
-          {page.funded && (
+          {showGiftPanels && (
             <Collapsible
               title={
                 <PanelTitle>
@@ -360,6 +398,18 @@ export function GiftPageView() {
             </Collapsible>
           )}
 
+          {isCollection && page.tokens.length >= 2 && (
+            <MergeCollectionButton
+              pageId={id}
+              onMerged={(updated) => {
+                setPage(updated)
+                setOpenSection('cashu')
+              }}
+            />
+          )}
+
+          <WalletResources />
+
           {page.funded && page.expiresAt && (
             <div className={`expiry-footer ${page.expired ? 'expired' : ''}`}>
               {page.expired ? (
@@ -368,15 +418,10 @@ export function GiftPageView() {
                   {expiryDate && <span> on {expiryDate}</span>}
                 </>
               ) : (
-                <>
-                  <strong>{daysLabel}</strong>
-                  {expiryDate && <span> · Valid until {expiryDate}</span>}
-                </>
+                validUntilLabel && <span>{validUntilLabel}</span>
               )}
             </div>
           )}
-
-          <WalletResources />
         </div>
       )}
     </div>

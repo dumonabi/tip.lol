@@ -19,6 +19,10 @@ export type StoredToken = {
 
 export type GiftPage = {
   id: string
+  /** gift (default) or collection (multi-token split). */
+  kind: PageKind
+  /** v1: always link. Future: seed unlock for collections. */
+  accessMode: PageAccessMode
   memo: string | null
   funded: boolean
   expired: boolean
@@ -69,39 +73,68 @@ export type UpdateContactRequest = {
 
 export type SyncRedeemRequest = {
   remainingToken?: string | null
+  /** When redeeming one token from a collection page. */
+  tokenIndex?: number
 }
 
-export type TokenOptimizePreview = {
-  currentLength: number
-  currentProofCount: number
-  currentProofSats: number[]
-  estimatedLength: number
-  estimatedProofCount: number
-  estimatedProofSats: number[]
-  feeSats: number
-  costLabel: string
-  swapRequired: boolean
-  currentlyStaticQr: boolean
-  currentlyEmoji: boolean
-  canReachStaticQr: boolean
-  canReachEmoji: boolean
-  estimatedReductionPercent: number
-  worthOptimizing: boolean
-  benefitSummary: string | null
-  alreadyOptimal: boolean
+export type TokenProofDetail = {
+  index: number
+  amountSats: number
 }
 
-export type TokenOptimizeResult = {
+export type TokenInsights = {
+  proofSats: number[]
+}
+
+/** How a page is unlocked. v1: link only. v2: optional BIP39 seed gate on collections. */
+export type PageAccessMode = 'link' | 'seed'
+
+/** gift = single-token page (today). collection = multi-token page from a split. */
+export type PageKind = 'gift' | 'collection'
+
+/** POST /api/pages/:id/split-collection/preview */
+export type SplitCollectionPreviewRequest = {
+  /** Proof index groups — one array per output token. */
+  parts: number[][]
+}
+
+export type SplitCollectionPartPreview = {
+  amountSats: number
+  proofSats: number[]
+  proofCount: number
+}
+
+export type SplitCollectionPreview = {
+  sourceAmountSats: number
+  parts: SplitCollectionPartPreview[]
+  outputTokenCount: number
+  receiveTotalSats: number
+}
+
+/** POST /api/pages/:id/split-collection */
+export type SplitCollectionRequest = {
+  parts: number[][]
+}
+
+export type SplitCollectionResult = {
   page: GiftPage
-  previousLength: number
-  newLength: number
-  previousProofCount: number
-  newProofCount: number
-  feeSats: number
-  reachedStaticQr: boolean
-  reachedEmoji: boolean
-  reductionPercent: number
-  benefitSummary: string | null
+  previousPageId: string
+  tokenCount: number
+}
+
+/** POST /api/pages/:id/merge-collection */
+export type MergeCollectionResult = {
+  page: GiftPage
+}
+
+/** POST /api/pages/:id/detach-token */
+export type DetachCollectionTokenRequest = {
+  tokenIndex: number
+}
+
+export type DetachCollectionTokenResult = {
+  giftPageId: string
+  collectionPage: GiftPage
 }
 
 export type ResolveLightningInvoiceRequest = {

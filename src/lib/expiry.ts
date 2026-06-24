@@ -15,11 +15,10 @@ export function useDaysRemaining(expiresAt: number | null): number | null {
   return days
 }
 
-export function formatDaysRemaining(days: number | null): string | null {
-  if (days === null) return null
-  if (days <= 0) return 'Expired'
-  if (days === 1) return '1 day left'
-  return `${days} days left`
+export function formatPageValidUntil(expiresAt: number | null): string | null {
+  const date = formatExpiryDate(expiresAt)
+  if (!date) return null
+  return `page valid until ${date}`
 }
 
 export function formatExpiryDate(expiresAt: number | null): string | null {

@@ -3,22 +3,19 @@ import {
   CASHU_EMOJI_CARRIER,
   tryEncodeEmojiToken,
 } from '../../shared/emoji-token'
-import { fetchBtcUsdPrice, fetchPageTokenProofs } from '../lib/api'
+import { fetchBtcUsdPrice } from '../lib/api'
 import { formatBtcFromSats } from '../lib/btc-amount'
 import { formatUsdFromSats } from '../lib/btc-usd'
 import { downloadQrFromContainer } from '../lib/qr-save'
 import type { GiftPage } from '../../shared/types'
-import { CheckIcon, CopyIcon, DownloadIcon, InfoIcon, QrCodeIcon } from './PanelIcons'
+import { CheckIcon, CopyIcon, DownloadIcon, QrCodeIcon } from './PanelIcons'
 import { SatSymbol } from './SatSymbol'
-import { TokenOptimize } from './TokenOptimize'
-import { TokenProofBills } from './TokenProofBills'
 import { TokenQr } from './TokenQr'
 
 type Props = {
   page: GiftPage
   onCopyToken: (token: string) => void
   onCopyEmoji: (emoji: string) => void
-  onOptimized: (page: GiftPage) => void
   copiedToken: boolean
   copiedEmoji: boolean
 }
@@ -27,7 +24,6 @@ export function CashuClaimHero({
   page,
   onCopyToken,
   onCopyEmoji,
-  onOptimized,
   copiedToken,
   copiedEmoji,
 }: Props) {
@@ -36,12 +32,7 @@ export function CashuClaimHero({
 
   const qrRef = useRef<HTMLDivElement>(null)
   const [showQr, setShowQr] = useState(false)
-  const [showInfo, setShowInfo] = useState(false)
-  const [proofSats, setProofSats] = useState<number[] | null>(null)
-  const [proofLoading, setProofLoading] = useState(false)
-  const [proofError, setProofError] = useState(false)
   const [btcUsd, setBtcUsd] = useState<number | null>(null)
-  const [saveMsg, setSaveMsg] = useState<string | null>(null)
 
   const emojiToken = useMemo(
     () => tryEncodeEmojiToken(primaryToken.token),
@@ -60,39 +51,10 @@ export function CashuClaimHero({
     }
   }, [page.id])
 
-  useEffect(() => {
-    setProofSats(null)
-    setProofError(false)
-    setProofLoading(false)
-  }, [primaryToken.token])
-
-  async function toggleInfo() {
-    const next = !showInfo
-    setShowInfo(next)
-
-    if (!next || proofSats !== null || proofLoading) return
-
-    setProofLoading(true)
-    setProofError(false)
-    try {
-      const amounts = await fetchPageTokenProofs(page.id)
-      setProofSats(amounts)
-    } catch {
-      setProofError(true)
-      setProofSats([])
-    } finally {
-      setProofLoading(false)
-    }
-  }
-
-  async function saveTokenQr() {
-    setSaveMsg(null)
-    try {
-      await downloadQrFromContainer(qrRef.current, 'cashu-token.png')
-      setSaveMsg('Token QR saved')
-    } catch {
-      setSaveMsg('Could not save token QR')
-    }
+  function saveTokenQr() {
+    void downloadQrFromContainer(qrRef.current, 'cashu-token.png').catch(() => {
+      /* download may be cancelled; no message */
+    })
   }
 
   return (
@@ -155,6 +117,12 @@ export function CashuClaimHero({
             )}
           </div>
 
+          {(copiedToken || copiedEmoji) && (
+            <p className="token-hero-copy-hint" role="status">
+              {copiedToken ? 'Copied as text' : 'Copied as emoji'}
+            </p>
+          )}
+
           {showQr && (
             <div className="share-qr-reveal">
               <div ref={qrRef}>
@@ -167,7 +135,7 @@ export function CashuClaimHero({
               <button
                 type="button"
                 className="share-qr-save-btn"
-                onClick={() => void saveTokenQr()}
+                onClick={saveTokenQr}
                 aria-label="Download QR"
                 title="Download QR"
               >
@@ -176,52 +144,6 @@ export function CashuClaimHero({
             </div>
           )}
         </div>
-
-        <section className="claim-hero-info-section" aria-label="Token information">
-          <div className="claim-hero-info-layout">
-            <button
-              type="button"
-              className={`token-proof-info-btn ${showInfo ? 'active' : ''}`}
-              onClick={() => void toggleInfo()}
-              aria-expanded={showInfo}
-              aria-label={
-                showInfo
-                  ? 'Hide token composition'
-                  : 'Show token composition'
-              }
-            >
-              <InfoIcon />
-            </button>
-
-            {showInfo && (
-              <div className="claim-hero-info-panel">
-                <div className="token-proof-col-align">
-                  <p className="token-proof-col-align__slot token-proof-count-label">
-                    Token composition
-                    {!proofLoading && !proofError && proofSats && (
-                      <>
-                        : {proofSats.length}{' '}
-                        {proofSats.length === 1 ? 'proof' : 'proofs'}
-                      </>
-                    )}
-                  </p>
-                </div>
-                <TokenProofBills
-                  proofSats={proofSats}
-                  loading={proofLoading}
-                  error={proofError}
-                  align="center"
-                />
-                <TokenOptimize
-                  pageId={page.id}
-                  onOptimized={onOptimized}
-                  enabled={showInfo}
-                  embedded
-                />
-              </div>
-            )}
-          </div>
-        </section>
       </div>
 
       {page.partiallySpent && page.initialAmountSats != null && (
@@ -232,8 +154,6 @@ export function CashuClaimHero({
         </p>
       )}
       {page.memo && <p className="memo">“{page.memo}”</p>}
-
-      {saveMsg && <p className="success compact">{saveMsg}</p>}
     </div>
   )
 }

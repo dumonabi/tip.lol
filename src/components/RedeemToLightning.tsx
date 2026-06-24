@@ -24,6 +24,7 @@ type Props = {
   pageId: string
   token: string
   giftBalanceSats: number
+  tokenIndex?: number
   onRedeemed?: (page: Awaited<ReturnType<typeof syncRedeemResult>>) => void
   onReady?: () => void
 }
@@ -44,6 +45,7 @@ export function RedeemToLightning({
   pageId,
   token,
   giftBalanceSats,
+  tokenIndex,
   onRedeemed,
   onReady,
 }: Props) {
@@ -181,6 +183,7 @@ export function RedeemToLightning({
   async function syncAfterPayment(payment: RedeemResult) {
     const updated = await syncRedeemResult(pageId, {
       remainingToken: payment.remainingToken,
+      ...(tokenIndex !== undefined ? { tokenIndex } : {}),
     })
     onRedeemed?.(updated)
 

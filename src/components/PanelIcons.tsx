@@ -20,6 +20,16 @@ export function ExchangePanelIcon({ className = 'panel-icon' }: IconProps) {
   )
 }
 
+export function SplitCollectionPanelIcon({ className = 'panel-icon' }: IconProps) {
+  return (
+    <svg className={className} viewBox="0 0 16 16" aria-hidden>
+      <rect x="2" y="2" width="5" height="5" rx="1" fill="none" stroke="currentColor" strokeWidth="1.2" />
+      <rect x="9" y="2" width="5" height="5" rx="1" fill="none" stroke="currentColor" strokeWidth="1.2" />
+      <rect x="5.5" y="9" width="5" height="5" rx="1" fill="none" stroke="currentColor" strokeWidth="1.2" />
+    </svg>
+  )
+}
+
 export function NotifyPanelIcon({ className = 'panel-icon' }: IconProps) {
   return (
     <span className={`${className} panel-emoji`} aria-hidden>
@@ -96,10 +106,62 @@ export function DownloadIcon({ className }: IconProps) {
   )
 }
 
+export function OpenInNewWindowIcon({ className }: IconProps) {
+  return (
+    <ShareIcon className={className}>
+      <rect
+        x="2.6"
+        y="5.4"
+        width="7.8"
+        height="7.8"
+        rx="1"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.3"
+      />
+      <path
+        d="M5.6 2.6h7.8v7.8"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.3"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+      <path
+        d="M11.4 2.6 5.4 8.6"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.3"
+        strokeLinecap="round"
+      />
+    </ShareIcon>
+  )
+}
+
+export function ExternalLinkIcon({ className }: IconProps) {
+  return <OpenInNewWindowIcon className={className} />
+}
+
 export function CheckIcon({ className }: IconProps) {
   return (
     <ShareIcon className={className}>
       <path d="M3.5 8.2 6.4 11l6.1-6.5" fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" />
+    </ShareIcon>
+  )
+}
+
+export function WarningIcon({ className }: IconProps) {
+  return (
+    <ShareIcon className={className}>
+      <path
+        d="M8 2.8 13.9 12.8H2.1L8 2.8z"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.25"
+        strokeLinejoin="round"
+      />
+      <path d="M8 6.1v3.2" stroke="currentColor" strokeWidth="1.35" strokeLinecap="round" />
+      <circle cx="8" cy="11.4" r="0.7" fill="currentColor" />
     </ShareIcon>
   )
 }
@@ -112,6 +174,86 @@ export function InfoIcon({ className }: IconProps) {
       <circle cx="8" cy="5.1" r="0.75" fill="currentColor" />
     </ShareIcon>
   )
+}
+
+/** Circular swap — bold refresh arrows */
+export function SwapIcon({ className }: IconProps) {
+  return (
+    <svg
+      className={className ?? 'share-action-icon'}
+      viewBox="0 0 24 24"
+      aria-hidden
+      fill="none"
+    >
+      <path
+        d="M17.8 9.2a7 7 0 0 0-12.1-2.2"
+        stroke="currentColor"
+        strokeWidth="2.6"
+        strokeLinecap="round"
+      />
+      <path
+        d="M16.2 9.2h3.1V6.1"
+        stroke="currentColor"
+        strokeWidth="2.6"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+      <path
+        d="M6.2 14.8a7 7 0 0 0 12.1 2.2"
+        stroke="currentColor"
+        strokeWidth="2.6"
+        strokeLinecap="round"
+      />
+      <path
+        d="M7.8 14.8H4.7v3.1"
+        stroke="currentColor"
+        strokeWidth="2.6"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  )
+}
+
+/** Padlock — secure balance toggle */
+export function SecureLockIcon({ className }: IconProps) {
+  return (
+    <svg
+      className={className ?? 'share-action-icon'}
+      viewBox="0 0 24 24"
+      aria-hidden
+      fill="none"
+    >
+      <path
+        d="M7.25 11V8.75a4.75 4.75 0 0 1 9.5 0V11"
+        stroke="currentColor"
+        strokeWidth="2.35"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+      <rect
+        x="5.25"
+        y="11"
+        width="13.5"
+        height="9.75"
+        rx="2.25"
+        stroke="currentColor"
+        strokeWidth="2.35"
+      />
+      <circle cx="12" cy="14.5" r="1.05" fill="currentColor" />
+      <path
+        d="M12 15.45v1.2"
+        stroke="currentColor"
+        strokeWidth="1.65"
+        strokeLinecap="round"
+      />
+    </svg>
+  )
+}
+
+/** @deprecated use SecureLockIcon */
+export function SecureVaultIcon({ className }: IconProps) {
+  return <SecureLockIcon className={className} />
 }
 
 export function MagicWandIcon({ className }: IconProps) {

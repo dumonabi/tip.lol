@@ -5,17 +5,26 @@ import {
   addTokenToPage,
   cleanupStalePages,
   clearPageTokenAndClaim,
+  convertCollectionToGift,
+  convertGiftToCollection,
+  detachCollectionTokenToNewGift,
+  fundCollectionPage,
   getPage,
+  getPageAccessMode,
   getPageIfActive,
+  getPageKind,
   getStoredTokens,
   insertPage,
   isClaimed,
   isExpired,
   normalizeToSingleToken,
   replacePageToken,
+  replaceCollectionTokens,
+  syncCollectionTokenAfterRedeem,
   syncPrimaryTokenAfterRedeem,
   touchClaimCheck,
   updatePageDetails,
+  vacatePageFunding,
   type GiftPageRow,
 } from './db.js'
 import { fetchLightningAddressInvoice } from './lnurl-pay.js'
@@ -24,19 +33,32 @@ import {
   computeDaysRemaining,
   type CreatePageResponse,
   type GiftPage,
-  type TokenOptimizeResult,
+  type SplitCollectionResult,
+  type MergeCollectionResult,
+  type DetachCollectionTokenResult,
+  type TokenInsights,
 } from '../shared/types.js'
 import { CASHU_EMOJI_CARRIER, resolveTokenFromInput } from '../shared/emoji-token.js'
+import { buildTokenInsights } from './token-insights.js'
 import {
-  OptimizeError,
-  executeTokenOptimize,
-  previewTokenOptimize,
-} from './token-optimize.js'
-import { listTokenProofSats } from './claim-check.js'
+  executeSplitFromContext,
+  previewSplitFromContext,
+  SplitCollectionError,
+  validateSplitProofParts,
+} from './split-collection.js'
+import { TokenContextError, decodeTokenResolving, resolveTokenProofDetails } from './token-context.js'
+import { mergeTokensOffline, MergeCollectionError } from './merge-collection.js'
+import {
+  CLAIM_CHECK_INTERVAL_MS,
+  SpendabilityError,
+  isSpendabilityFresh,
+  requireTokenFullySpendableUnlessFresh,
+  requireTokensFullySpendableUnlessFresh,
+  syncCollectionTokensWithMint,
+} from './claim-check.js'
 import { getBtcUsdPrice } from './btc-price.js'
 
 const SLUG_BYTES = 32
-const CLAIM_CHECK_INTERVAL_MS = 5 * 60 * 1000
 
 let startupDone = false
 
@@ -98,6 +120,8 @@ function rowToPublicPage(row: NonNullable<ReturnType<typeof getPage>>): GiftPage
 
   return {
     id: row.id,
+    kind: getPageKind(row),
+    accessMode: getPageAccessMode(row),
     memo: row.memo,
     funded: !claimed && tokens.length > 0,
     expired,
@@ -120,8 +144,34 @@ function rowToPublicPage(row: NonNullable<ReturnType<typeof getPage>>): GiftPage
   }
 }
 
-async function refreshTokenFromMint(row: GiftPageRow): Promise<void> {
+async function refreshTokenFromMint(
+  row: GiftPageRow,
+  options: { force?: boolean } = {},
+): Promise<void> {
   if (row.claimed_at !== null) return
+
+  const now = Date.now()
+  if (
+    !options.force &&
+    row.claim_check_at !== null &&
+    now - row.claim_check_at < CLAIM_CHECK_INTERVAL_MS
+  ) {
+    return
+  }
+
+  if (getPageKind(row) === 'collection') {
+    const tokens = getStoredTokens(row)
+    if (tokens.length === 0) return
+
+    const result = await syncCollectionTokensWithMint(tokens)
+    if (!result.checkedAny) return
+
+    touchClaimCheck(row.id, now)
+    if (result.changed) {
+      replaceCollectionTokens(row.id, result.tokens)
+    }
+    return
+  }
 
   const { syncTokenWithMint } = await import('./claim-check.js')
 
@@ -132,14 +182,6 @@ async function refreshTokenFromMint(row: GiftPageRow): Promise<void> {
   const tokens = getStoredTokens(refreshed)
   const primary = tokens[0]
   if (!primary) return
-
-  const now = Date.now()
-  if (
-    refreshed.claim_check_at !== null &&
-    now - refreshed.claim_check_at < CLAIM_CHECK_INTERVAL_MS
-  ) {
-    return
-  }
 
   const sync = await syncTokenWithMint(primary.token)
   if (!sync.ok) return
@@ -185,7 +227,7 @@ async function parseTokenInput(raw: string) {
   }
 }
 
-function getFundedPageToken(id: string) {
+function getFundedPageToken(id: string, options: { allowCollection?: boolean } = {}) {
   const row = getPageIfActive(id)
   if (!row) return { error: 'Page not found' as const, status: 404 as const }
   if (isClaimed(row)) {
@@ -195,11 +237,49 @@ function getFundedPageToken(id: string) {
     return { error: 'This page has expired' as const, status: 410 as const }
   }
   const tokens = getStoredTokens(row)
+  if (getPageKind(row) === 'collection' && !options.allowCollection) {
+    return {
+      error: 'This action is only available on a single-token gift page' as const,
+      status: 409 as const,
+    }
+  }
   const primary = tokens[0]
   if (!primary) {
     return { error: 'This page has no token yet' as const, status: 409 as const }
   }
-  return { row, primary }
+  return { row, primary, tokens }
+}
+
+function splitCollectionErrorResponse(err: unknown) {
+  const message =
+    err instanceof SplitCollectionError
+      ? err.message
+      : err instanceof SpendabilityError
+        ? err.message
+        : err instanceof TokenContextError
+          ? err.message
+          : err instanceof Error
+            ? err.message
+            : 'Split collection request failed'
+  const status =
+    err instanceof SpendabilityError ? (err.httpStatus as 400 | 409 | 503) : (400 as const)
+  return { body: { error: message }, status }
+}
+
+function mergeCollectionErrorResponse(err: unknown) {
+  const message =
+    err instanceof MergeCollectionError
+      ? err.message
+      : err instanceof SpendabilityError
+        ? err.message
+        : err instanceof TokenContextError
+          ? err.message
+          : err instanceof Error
+            ? err.message
+            : 'Merge collection request failed'
+  const status =
+    err instanceof SpendabilityError ? (err.httpStatus as 400 | 409 | 503) : (400 as const)
+  return { body: { error: message }, status }
 }
 
 export function createApp() {
@@ -362,7 +442,14 @@ export function createApp() {
 
     try {
       const remaining = rawRemaining ? await parseTokenInput(rawRemaining) : null
-      const result = syncPrimaryTokenAfterRedeem(id, remaining)
+      const tokenIndex =
+        typeof body.tokenIndex === 'number' && Number.isInteger(body.tokenIndex)
+          ? body.tokenIndex
+          : 0
+      const result =
+        getPageKind(row) === 'collection'
+          ? syncCollectionTokenAfterRedeem(id, tokenIndex, remaining)
+          : syncPrimaryTokenAfterRedeem(id, remaining)
 
       if (!result.ok) {
         if (result.reason === 'expired') {
@@ -370,6 +457,9 @@ export function createApp() {
         }
         if (result.reason === 'claimed') {
           return c.json({ error: 'This gift was already claimed' }, 410)
+        }
+        if (result.reason === 'invalid_token') {
+          return c.json({ error: 'Token not found in collection' }, 404)
         }
         return c.json({ error: 'Could not update gift page' }, 409)
       }
@@ -398,14 +488,23 @@ export function createApp() {
       return c.json({ error: 'Invalid page id' }, 400)
     }
 
-    const funded = getFundedPageToken(id)
+    const funded = getFundedPageToken(id, { allowCollection: true })
     if ('error' in funded) {
       return c.json({ error: funded.error }, funded.status)
     }
 
+    const tokenIndex = Number(c.req.query('tokenIndex') ?? 0)
+    const tokenEntry =
+      getPageKind(funded.row) === 'collection'
+        ? funded.tokens[tokenIndex]
+        : funded.primary
+    if (!tokenEntry) {
+      return c.json({ error: 'Token not found in collection' }, 404)
+    }
+
     try {
-      const proofSats = await listTokenProofSats(funded.primary.token)
-      return c.json({ proofSats })
+      const proofs = await resolveTokenProofDetails(tokenEntry.token)
+      return c.json({ proofs })
     } catch (err) {
       const message =
         err instanceof Error ? err.message : 'Could not read token proofs'
@@ -413,7 +512,7 @@ export function createApp() {
     }
   })
 
-  app.post('/api/pages/:id/optimize-token/preview', async (c) => {
+  app.post('/api/pages/:id/token-insights', async (c) => {
     const id = c.req.param('id')
     if (!isValidSlug(id)) {
       return c.json({ error: 'Invalid page id' }, 400)
@@ -425,20 +524,16 @@ export function createApp() {
     }
 
     try {
-      const preview = await previewTokenOptimize(funded.primary.token)
-      return c.json(preview)
+      const insights = buildTokenInsights(funded.primary.token)
+      return c.json(insights satisfies TokenInsights)
     } catch (err) {
       const message =
-        err instanceof OptimizeError
-          ? err.message
-          : err instanceof Error
-            ? err.message
-            : 'Could not preview optimization'
+        err instanceof Error ? err.message : 'Could not load token insights'
       return c.json({ error: message }, 400)
     }
   })
 
-  app.post('/api/pages/:id/optimize-token', async (c) => {
+  app.post('/api/pages/:id/split-collection/preview', async (c) => {
     const id = c.req.param('id')
     if (!isValidSlug(id)) {
       return c.json({ error: 'Invalid page id' }, 400)
@@ -449,41 +544,209 @@ export function createApp() {
       return c.json({ error: funded.error }, funded.status)
     }
 
+    const body = await c.req.json().catch(() => ({}))
     try {
-      const result = await executeTokenOptimize(funded.primary.token)
-      replacePageToken(id, {
-        token: result.token,
-        amountSats: result.amountSats,
-        unit: result.unit,
-        mint: result.mint,
+      await requireTokenFullySpendableUnlessFresh(
+        funded.row.claim_check_at,
+        funded.primary.token,
+      )
+      const ctx = await decodeTokenResolving(funded.primary.token)
+      const parts = validateSplitProofParts(body.parts, ctx.proofs.length)
+      const preview = previewSplitFromContext(ctx, parts)
+      return c.json(preview)
+    } catch (err) {
+      const { body: errBody, status } = splitCollectionErrorResponse(err)
+      return c.json(errBody, status)
+    }
+  })
+
+  app.post('/api/pages/:id/split-collection', async (c) => {
+    const id = c.req.param('id')
+    if (!isValidSlug(id)) {
+      return c.json({ error: 'Invalid page id' }, 400)
+    }
+
+    const funded = getFundedPageToken(id)
+    if ('error' in funded) {
+      return c.json({ error: funded.error }, funded.status)
+    }
+
+    const body = await c.req.json().catch(() => ({}))
+    try {
+      await requireTokenFullySpendableUnlessFresh(
+        funded.row.claim_check_at,
+        funded.primary.token,
+      )
+      const ctx = await decodeTokenResolving(funded.primary.token)
+      const parts = validateSplitProofParts(body.parts, ctx.proofs.length)
+      const result = executeSplitFromContext(ctx, parts)
+
+      const converted = convertGiftToCollection(
+        id,
+        result.tokens.map((entry) => ({
+          token: entry.token,
+          amountSats: entry.amountSats,
+          unit: entry.unit,
+          mint: entry.mint,
+        })),
+      )
+
+      if (!converted.ok) {
+        const message =
+          converted.reason === 'already_collection'
+            ? 'This page is already a collection'
+            : converted.reason === 'not_funded'
+              ? 'This page has no token yet'
+              : 'Could not convert this page into a collection'
+        return c.json({ error: message }, 500)
+      }
+
+      const updated = getPageIfActive(id)
+      if (!updated) {
+        return c.json({ error: 'Page not found' }, 500)
+      }
+
+      const response: SplitCollectionResult = {
+        page: rowToPublicPage(updated),
+        previousPageId: id,
+        tokenCount: result.tokens.length,
+      }
+      return c.json(response)
+    } catch (err) {
+      const { body: errBody, status } = splitCollectionErrorResponse(err)
+      return c.json(errBody, status)
+    }
+  })
+
+  app.post('/api/pages/:id/merge-collection', async (c) => {
+    const id = c.req.param('id')
+    if (!isValidSlug(id)) {
+      return c.json({ error: 'Invalid page id' }, 400)
+    }
+
+    const funded = getFundedPageToken(id, { allowCollection: true })
+    if ('error' in funded) {
+      return c.json({ error: funded.error }, funded.status)
+    }
+    if (getPageKind(funded.row) !== 'collection') {
+      return c.json({ error: 'This page is not a token collection' }, 409)
+    }
+    if (funded.tokens.length < 2) {
+      return c.json({ error: 'Need at least two tokens to merge' }, 400)
+    }
+
+    try {
+      if (!isSpendabilityFresh(funded.row.claim_check_at)) {
+        await refreshTokenFromMint(funded.row)
+      }
+
+      const current = getFundedPageToken(id, { allowCollection: true })
+      if ('error' in current) {
+        return c.json({ error: current.error }, current.status)
+      }
+      if (getPageKind(current.row) !== 'collection') {
+        return c.json({ error: 'This page is not a token collection' }, 409)
+      }
+      if (current.tokens.length < 2) {
+        return c.json(
+          {
+            error:
+              current.tokens.length === 0
+                ? 'All tokens in this collection were already spent'
+                : 'Need at least two tokens to merge',
+          },
+          409,
+        )
+      }
+
+      await requireTokensFullySpendableUnlessFresh(
+        current.row.claim_check_at,
+        current.tokens.map((entry) => entry.token),
+      )
+      const merged = await mergeTokensOffline(current.tokens.map((entry) => entry.token))
+      convertCollectionToGift(id, {
+        token: merged.token,
+        amountSats: merged.amountSats,
+        unit: merged.unit,
+        mint: merged.mint,
       })
 
       const updated = getPageIfActive(id)
       if (!updated) {
-        return c.json({ error: 'Page not found' }, 404)
+        return c.json({ error: 'Page not found' }, 500)
       }
 
-      const response: TokenOptimizeResult = {
+      const response: MergeCollectionResult = {
         page: rowToPublicPage(updated),
-        previousLength: result.previousLength,
-        newLength: result.newLength,
-        previousProofCount: result.previousProofCount,
-        newProofCount: result.newProofCount,
-        feeSats: result.feeSats,
-        reachedStaticQr: result.reachedStaticQr,
-        reachedEmoji: result.reachedEmoji,
-        reductionPercent: result.reductionPercent,
-        benefitSummary: result.benefitSummary,
       }
       return c.json(response)
     } catch (err) {
-      const message =
-        err instanceof OptimizeError
-          ? err.message
-          : err instanceof Error
-            ? err.message
-            : 'Could not optimize token'
-      return c.json({ error: message }, 400)
+      const { body: errBody, status } = mergeCollectionErrorResponse(err)
+      return c.json(errBody, status)
+    }
+  })
+
+  app.post('/api/pages/:id/detach-token', async (c) => {
+    const id = c.req.param('id')
+    if (!isValidSlug(id)) {
+      return c.json({ error: 'Invalid page id' }, 400)
+    }
+
+    const funded = getFundedPageToken(id, { allowCollection: true })
+    if ('error' in funded) {
+      return c.json({ error: funded.error }, funded.status)
+    }
+    if (getPageKind(funded.row) !== 'collection') {
+      return c.json({ error: 'This page is not a token collection' }, 409)
+    }
+
+    const body = await c.req.json().catch(() => ({}))
+    const tokenIndex = body.tokenIndex
+    if (typeof tokenIndex !== 'number' || !Number.isInteger(tokenIndex) || tokenIndex < 0) {
+      return c.json({ error: 'Invalid token index' }, 400)
+    }
+    if (!funded.tokens[tokenIndex]) {
+      return c.json({ error: 'Token not found in collection' }, 404)
+    }
+
+    try {
+      const tokenEntry = funded.tokens[tokenIndex]!
+      await requireTokenFullySpendableUnlessFresh(
+        funded.row.claim_check_at,
+        tokenEntry.token,
+      )
+
+      const newId = makeSlug()
+      const detached = detachCollectionTokenToNewGift(id, newId, tokenIndex)
+      if (!detached.ok) {
+        const message =
+          detached.reason === 'invalid_token'
+            ? 'Token not found in collection'
+            : detached.reason === 'not_collection'
+              ? 'This page is not a token collection'
+              : detached.reason === 'expired'
+                ? 'This page has expired'
+                : detached.reason === 'claimed'
+                  ? 'This gift was already claimed'
+                  : 'Could not open token as its own page'
+        const status =
+          detached.reason === 'expired' || detached.reason === 'claimed' ? 410 : 409
+        return c.json({ error: message }, status)
+      }
+
+      const collection = getPageIfActive(id)
+      if (!collection) {
+        return c.json({ error: 'Collection page not found' }, 500)
+      }
+
+      const response: DetachCollectionTokenResult = {
+        giftPageId: newId,
+        collectionPage: rowToPublicPage(collection),
+      }
+      return c.json(response)
+    } catch (err) {
+      const { body: errBody, status } = splitCollectionErrorResponse(err)
+      return c.json(errBody, status)
     }
   })
 

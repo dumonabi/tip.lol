@@ -257,12 +257,12 @@ export const CashuTokenInput = forwardRef<CashuTokenInputHandle, Props>(
         />
 
         <div className="token-actions">
-          <button type="button" className="secondary" onClick={() => void handlePaste()}>
+          <button type="button" className="load-token-action" onClick={() => void handlePaste()}>
             Paste
           </button>
           <button
             type="button"
-            className="secondary"
+            className="load-token-action"
             onClick={() => void startScanner()}
             disabled={!canScan || showScanner}
           >
